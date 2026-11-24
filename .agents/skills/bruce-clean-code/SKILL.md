@@ -3,12 +3,12 @@ name: bruce-clean-code
 description: Review a Bruce firmware implementation plan or completed change for unnecessary complexity, clear state ownership, and verifiable behavior.
 ---
 
-# Проверка простоты изменений Bruce
+# Review Bruce Changes for Simplicity
 
-Для плана проверь, что каждая правка нужна для наблюдаемого результата, существующие API и состояния переиспользованы, а исправление устраняет причину сбоя. Назови самый короткий тест, который отличит исправленное поведение от старого.
+When reviewing a plan, check that each change contributes to an observable outcome, that it reuses existing APIs and state, and that the fix addresses the cause of the failure. Identify the shortest test that distinguishes the corrected behavior from the previous behavior.
 
-Для реализации проверь дублирование решений, размер изменений, контракт вызывающего кода, границы ввода, повторный запуск и частичный сбой. Для C/C++ учитывай стоимость новых буферов и выделений, владельца состояния, ISR и блокировки. Диагностическое замечание должно содержать конкретное последствие и минимальную правку.
+When reviewing an implementation, check for duplicated solutions and examine the size of the diff, the caller contract, input limits, retry behavior, and partial failures. For C/C++, account for the cost of new buffers and allocations, state ownership, ISRs, and locking. Each finding should describe a concrete consequence and propose a minimal fix.
 
-Верни замечания основному агенту с устойчивым ID, приоритетом, местом и проверкой. Пиши, какие выводы основаны на чтении кода, а какие подтверждены измерением или тестом. Сравни замечания повторного прохода с предыдущими ID.
+Report findings to the primary agent with stable IDs, priorities, locations, and verification steps. State which conclusions come from reading the code and which are backed by measurements or tests. Match findings from subsequent reviews to their previous IDs.
 
-Методика адаптирует идеи [ub-mode](https://github.com/unclebob/ub-mode) к ревью Bruce. Внешние анализаторы, если они применимы и уже доступны, дают дополнительные данные. Эту проверку можно выполнить по плану и diff.
+This review adapts ideas from [ub-mode](https://github.com/unclebob/ub-mode) for Bruce. External analyzers can provide additional evidence when relevant and already available. You can conduct this review using the plan and diff.

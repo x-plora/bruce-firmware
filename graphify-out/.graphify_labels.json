@@ -877,7 +877,7 @@
   "875": "ESP32-S3: memory, dual-core concurrency, radio coexistence, AI acceleration",
   "876": "ESP32-S3 power management: sleep modes and the ULP coprocessors",
   "877": "LilyGO TTGO T4 v1.3 — Pinouts to use Bruce",
-  "878": "USB Mass Storage",
+  "878": "Bruce Firmware Audit for the LILYGO T-Embed CC1101 Plus",
   "879": "Adafruit-PN532/README.md",
   "880": "list.h",
   "881": "ESP-IDF SensorLib TouchDrv examples",

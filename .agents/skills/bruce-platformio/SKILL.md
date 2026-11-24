@@ -3,10 +3,10 @@ name: bruce-platformio
 description: Build and test Bruce firmware with PlatformIO, diagnose Windows toolchain failures, or verify an explicitly assigned hardware scenario.
 ---
 
-# Сборка и проверка Bruce
+# Build and Verify Bruce
 
-1. Проверь `default_envs`, `extra_configs`, целевой профиль и его фильтры исходников. Для Plus собирай `pio run -e lilygo-t-embed-cc1101`. Используй `pio test` только после проверки, что подходящий тестовый набор и среда существуют. На Windows сначала проверь `Get-Command pio`, затем при наличии установки проверь путь PlatformIO из IDE или `$env:USERPROFILE/.platformio/penv/Scripts/pio.exe`.
-2. Проверь `pio --version`, а при сбоях зависимостей — `git submodule status` и установленные пакеты. Например, `ModuleNotFoundError: urllib3` при запуске `pio` означает сбой окружения до компиляции. Отчитай отдельно о запуске CLI, подготовке пакетов и сборке. Не исправляй окружение через правки прошивки.
-3. Сохрани точную команду, первый значимый сбой, профиль и результат. После успешной сборки приведи Flash/RAM из отчёта PlatformIO и базу сравнения, если она есть. Host-проверку, компиляцию, загрузку и наблюдение на плате фиксируй отдельно.
-4. Перед аппаратной проверкой согласуй плату, порт, носитель и владение стендом. Для MSC используй тестовую microSD и согласованные сценарии повторного входа, копирования, извлечения и отключения. При параллельных сборках изолируй каталоги артефактов, а для USB/Serial предоставь одному исполнителю доступ на время сценария.
-5. Передай результат в формате `PASS`, `FAIL`, `NOT_RUN` или `BLOCKED` и назови фактическую причину пропуска или блокировки. Если поручение дано `tester`, предложи необходимые изменения владельцу файлов через основного агента.
+1. Check `default_envs`, `extra_configs`, the target profile, and its source filters. For the T-Embed CC1101 Plus, build with `pio run -e lilygo-t-embed-cc1101`. Before running `pio test`, verify that a suitable test suite and environment exist. On Windows, start with `Get-Command pio`. If PlatformIO is installed, check the executable path in the IDE or at `$env:USERPROFILE/.platformio/penv/Scripts/pio.exe`.
+2. Check `pio --version`. If dependencies fail, check `git submodule status` and the installed packages. For example, `ModuleNotFoundError: urllib3` when launching `pio` indicates an environment failure before compilation. Report CLI startup, package setup, and the build separately. Keep environment fixes outside the firmware source.
+3. Record the exact command, the first meaningful failure, the profile, and the result. After a successful build, report flash and RAM usage from PlatformIO and include a comparison baseline if available. Record host checks, compilation, flashing, and observations on the board separately.
+4. Before hardware verification, agree on the board, port, storage medium, and who controls the test bench. For MSC, use a test microSD card and the agreed scenarios for re-entry, copying, ejecting, and disconnecting. For parallel builds, isolate artifact directories. Give one operator exclusive access to USB and serial for the duration of the scenario.
+5. Report the outcome as `PASS`, `FAIL`, `NOT_RUN`, or `BLOCKED` and give the actual reason for any skip or blocker. If the task is assigned to the `tester`, route proposed changes to the file owner through the primary agent.

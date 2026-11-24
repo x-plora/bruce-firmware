@@ -1,7 +1,7 @@
 # Graph Report - bruce-firmware  (2026-11-24)
 
 ## Corpus Check
-- 1640 files · ~9,916,330 words
+- 1640 files · ~9,916,826 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 597 file(s) not represented in the graph (top: .ir 218, .ino 159, .ini 58)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `69d39cae`
+- Built from commit: `e9c344c3`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -709,7 +709,7 @@
 - ESP32-S3: memory, dual-core concurrency, radio coexistence, AI acceleration
 - ESP32-S3 power management: sleep modes and the ULP coprocessors
 - LilyGO TTGO T4 v1.3 — Pinouts to use Bruce
-- USB Mass Storage
+- Bruce Firmware Audit for the LILYGO T-Embed CC1101 Plus
 - Adafruit-PN532/README.md
 - list.h
 - ESP-IDF SensorLib TouchDrv examples
@@ -896,7 +896,7 @@
 10. `HapticDriver_AW86224` - 153 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `Интерфейс и файловое меню` --references--> `drawSubmenu()`  [INFERRED]
+- `User Interface and File Menu` --references--> `drawSubmenu()`  [INFERRED]
   docs/t-embed-cc1101-plus-audit.md → src/core/display.cpp
 - `Input task and the shared-SPI touchscreen` --references--> `check()`  [INFERRED]
   src/hal/README.md → include/globals.h
@@ -1449,8 +1449,8 @@ Cohesion: 0.04
 Nodes (12): pushImageFallback(), tft_sprite, _buffer, _colorDepth, _cursorX, _cursorY, _display, _textBgColor (+4 more)
 
 ### Community 142 - "DeviceBeginCommon"
-Cohesion: 0.04
-Nodes (16): begin(), ComplexDeviceWithHal, begin(), ComplexStaticDeviceWithHal, DeviceBeginCommon, _addr, comm, hal (+8 more)
+Cohesion: 0.05
+Nodes (15): begin(), ComplexDeviceWithHal, begin(), ComplexStaticDeviceWithHal, DeviceBeginCommon, _addr, comm, hal (+7 more)
 
 ### Community 143 - "Common Devices Reference"
 Cohesion: 0.05
@@ -1910,7 +1910,7 @@ Nodes (13): PMU_Gpio, buffer_decode_base64(), native_buffer_from(), native_buffe
 
 ### Community 265 - "ESP32-S3 chip capabilities"
 Cohesion: 0.07
-Nodes (21): Bruce Firmware, graphify, Проверка простоты изменений Bruce, Документация и тексты Bruce, Bruce Embedded, Сборка и проверка Bruce, ESP32-S3 chip capabilities, Memory, concurrency, radio coexistence, and AI acceleration (+13 more)
+Nodes (21): Bruce Firmware, graphify, Review Bruce Changes for Simplicity, Bruce Documentation and Copy, Bruce Embedded, Build and Verify Bruce, ESP32-S3 chip capabilities, Memory, concurrency, radio coexistence, and AI acceleration (+13 more)
 
 ### Community 266 - "Timer"
 Cohesion: 0.14
@@ -2301,8 +2301,8 @@ Cohesion: 0.17
 Nodes (10): i2c_drv_device_init(), i2c_drv_init(), i2c_drv_scan(), app_main(), bhi260_init(), bhi260_isr_init(), bma423_init(), pcf8563_init() (+2 more)
 
 ### Community 375 - "SensorCommI2C"
-Cohesion: 0.10
-Nodes (7): init_legacy(), init_ll_hal(), SensorCommI2C, addr, sendStopFlag, SensorErrorMixin, last_error_
+Cohesion: 0.08
+Nodes (8): init_legacy(), init_ll_hal(), SensorCommI2C, addr, sendStopFlag, SensorCommBase, SensorErrorMixin, last_error_
 
 ### Community 376 - "CommandTable"
 Cohesion: 0.12
@@ -3488,9 +3488,9 @@ Nodes (6): A note on "why is my code slow to wake / not saving power", Automatic
 Cohesion: 0.29
 Nodes (6): Buttons (active LOW, on input-only GPIOs with external pull-ups), Display (ILI9341, VSPI), External RF modules (no module fitted by default), I2C (Grove) — FM Radio, PN532, other I2C devices, LilyGO TTGO T4 v1.3 — Pinouts to use Bruce, SD Card (HSPI)
 
-### Community 878 - "USB Mass Storage"
+### Community 878 - "Bruce Firmware Audit for the LILYGO T-Embed CC1101 Plus"
 Cohesion: 0.29
-Nodes (7): 1. P0 · Повторный вход ломает жизненный цикл USB, 2. P0 · Прошивка и ПК могут одновременно писать на microSD, 3. P1 · Обработчик записи делает лишнюю работу и ложно отклоняет запись, USB Mass Storage, Аудит прошивки Bruce для LILYGO T-Embed CC1101 Plus, Интерфейс и файловое меню, Порядок работ и проверка
+Nodes (7): 1. P0 · Re-entering Mass Storage breaks the USB lifecycle, 2. P0 · The firmware and PC can write to the microSD card concurrently, 3. P1 · The write handler does extra work and rejects valid writes, Bruce Firmware Audit for the LILYGO T-Embed CC1101 Plus, USB Mass Storage, User Interface and File Menu, Work Order and Verification
 
 ### Community 879 - "Adafruit-PN532/README.md"
 Cohesion: 0.29
@@ -4065,7 +4065,7 @@ Nodes (3): RFModules, CC1101_SPI_MODULE, M5_RF_MODULE
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `String` connect `String` to `.length`, `karma_attack.cpp`, `arduino`, `HandshakeCapture`, `TFT_eSPI`, `display.cpp`, `loopOptions`, `check`, `audio.cpp`, `initRfModule`, `sdr.cpp`, `.c_str`, `EvilPortal`, `stdint`, `TFT_eSprite`, `tft_display`, `rf_stream_internal.h`, `bhy2_set_parameter`, `rf_decoder_renault_v1.c`, `KarmaRuntimeState`, `displayError`, `EvilPortalEndpoints`, `setupSdCard`, `ardgfx.cpp`, `lovyan.cpp`, `PN532KillerTools`, `DisplayDrivers.h`, `BLE_Suite.cpp`, `Adafruit_PN532`, `rf_decoder_kia_v6.c`, `wire_commands.cpp`, `native_sdl.cpp`, `m5gfx_hal.cpp`, `SRIXTool`, `.deinitBLE`, `EspConnection`, `ducky_typer.cpp`, `rf_decoder_kia_v0.c`, `rf_stream_support.c`, `.drawString`, `BruceConfigPins`, `esp_wps_adapted.c`, `EMVReader`, `BleKeyboard`, `Converter<String>`, `getMacAddress`, `RFScan`, `USBSerial`, `display`, `.validateEvilEndpointCreds`, `Credential`, `QrCodeEntry`, `WiFiCredential`, `sd_functions`, `rf_decoder_ford_v2.c`, `sniffer.cpp`, `BLE_Suite.h`, `rf_stream.h`, `ST25R3916`, `rf_decoder_fiat_v1.c`, `.setEvilGatewayIp`, `ProtoPirate`, `rf_stream_memory.c`, `tft_sprite`, `settings`, `src/main.cpp`, `rf_protocol_engine.cpp`, `rf_keeloq_core.h`, `themeInfo`, `PN532.cpp`, `radio.c`, `NimBLEAddress`, `Wardriving`, `tft_sprite`, `config.cpp`, `SpectrumPlot`, `helpers_js.h`, `rf_decoder_ford_v1.c`, `core.c`, `tft_sprite`, `BruceConfig`, `logic_analyzer.cpp`, `button_adc.c`, `App`, `tftLogger.cpp`, `rf_decoder_honda_v2.c`, `ScannerData`, `tftespi.cpp`, `jam_detect.cpp`, `BLE_API`, `RFIDInterface`, `loopMenuOptions`, `BLESerialService`, `iot_button.c`, `ble_spam.cpp`, `pwnagotchi.cpp`, `RFID2.cpp`, `nrf_mousejack.cpp`, `bhi3.c`, `TFT_eSPI_Button`, `rf_decoder_fiat_v2.c`, `qrencode.c`, `RFID125`, `rf_decoder_mazda_v0.c`, `dialog_js.cpp`, `SdOpenFile`, `rfalNfcDevice`, `rf_decoder_ford_v3.c`, `rf_decoder_honda_v1.c`, `HIDDeviceProfile`, `RfCodes`, `wifi_recover.cpp`, `includes.h`, `tft_display`, `rf_decoder_kia_v7.c`, `helpers_js.cpp`, `_deselectSharedSpiDevices`, `.execute`, `cli.cpp`, `displayWarning`, `rf_encoder.cpp`, `Option`, `tft_sprite`, `SelectedDevice`, `qrcode.cpp`, `SensorBHI360`, `printSubtitle`, `responder.cpp`, `rf_decoder_chrysler_v0.c`, `i2c_bus.cpp`, `.setup`, `apdu.h`, `link.c`, `I2CLease`, `WifiMenu.cpp`, `dual_band_analyzer.cpp`, `wf_pixie_all`, `showAudioSubMenu`, `XPowersLibInterface_Linux/main.cpp`, `configPins.cpp`, `rf_vehicle_aut64.c`, `rf_spectrum.cpp`, `FrameInfo`, `SDFS`, `os.h`, `DuckyScriptEngine`, `.forceInjectDuckyScript`, `rf_utils.cpp`, `globals.h`, `tft_logger::log_drawString`, `CredentialRecord`, `.handleCtap2GetAssertion`, `audio_player.cpp`, `.parseGetAssertionRequest`, `i2cLeaseDevice`, `RfCaptureListState`, `BackgroundPortal`, `SnifferPacket`?**
-  _High betweenness centrality (0.292) - this node is a cross-community bridge._
+  _High betweenness centrality (0.293) - this node is a cross-community bridge._
 - **Are the 13 inferred relationships involving `String` (e.g. with `createUtilCommands()` and `.findAndAttackAudioServices()`) actually correct?**
   _`String` has 13 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `_freq`, `_addr`, `_open` to the rest of the system?**

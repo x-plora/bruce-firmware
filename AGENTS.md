@@ -1,12 +1,12 @@
 # Bruce Firmware
 
-Для сборки и проверки используй профиль из задачи. Для T-Embed CC1101 Plus это `lilygo-t-embed-cc1101`. Перед правками HAL проверь ревизию платы, `boards/<board>/`, фактические флаги и владельцев общих шин.
+Use the build profile specified in the task for builds and verification. For the T-Embed CC1101 Plus, use `lilygo-t-embed-cc1101`. Before changing the HAL, check the board revision, `boards/<board>/`, the active build flags, and shared bus ownership.
 
-Запускай X-Dev по явной просьбе пользователя работать командой или подключить субагентов. Порядок работы, роли и маршруты навыков описаны в [.codex/CREW.md](.codex/CREW.md). Редактирование конфигурации X-Dev само по себе команду не запускает.
+Launch X-Dev only when the user explicitly asks to work as a team or involve subagents. Apply the same rule when editing the X-Dev configuration. The workflow, roles, and skill routing are documented in [.codex/CREW.md](.codex/CREW.md).
 
-Указывай, какие проверки выполнены на хосте, в сборке и на плате. Загружай прошивку и меняй состояние устройства в рамках явного поручения на аппаратную проверку.
+Report which checks were performed on the host, during the build, and on the board. Flash firmware and change device state only within the scope of an explicit hardware verification request.
 
-Пиши все технические описания и сообщения коммитов (заголовки и основной текст) на английском языке.
+Write all project instructions, technical descriptions, and commit messages in English. This applies to both commit subjects and bodies.
 
 ## graphify
 
