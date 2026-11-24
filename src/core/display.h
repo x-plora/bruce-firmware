@@ -179,8 +179,11 @@ void padprintln(double n, int digits, int16_t padx = 1);
 int loopOptions(
     std::vector<Option> &options, uint8_t menuType, const char *subText, int index = 0,
     bool interpreter = false, bool letterShortcuts = false, uint16_t pageJumpSize = 0, bool border = true,
-    bool compact = false
+    bool compact = false, bool *longPressResult = nullptr
 );
+// Borrows a stable file list until the selection or Esc returns; creates labels on demand.
+int loopFileOptions(const std::vector<FileList> &files, int index = 0, uint16_t pageJumpSize = 0, bool *longPressResult = nullptr);
+
 inline int loopOptions(std::vector<Option> &options, int _index) {
     return loopOptions(options, MENU_TYPE_REGULAR, "", _index, false);
 }
@@ -193,7 +196,10 @@ Opt_Coord drawOptions(
     bool firstRender = true, bool border = true, bool compact = false
 );
 
-void drawSubmenu(int index, std::vector<Option> &options, const char *title);
+// Caller owns status refresh; invalidate after another renderer repaints the submenu.
+void drawSubmenu(
+    int index, std::vector<Option> &options, const char *title, bool firstRender = true, int previousIndex = -1
+);
 
 void drawStatusBar();
 void drawMainBorder(bool clear = true);

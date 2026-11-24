@@ -20,11 +20,14 @@
 
 #include <MD5Builder.h>
 #include <algorithm> // for std::sort
+#include <cctype>
 #include <esp_rom_crc.h>
+#include <mutex>
 
 // SPIClass sdcardSPI;
 String fileToCopy;
 std::vector<FileList> fileList;
+static std::recursive_mutex sdMountMutex;
 
 /***************************************************************************************
 ** Function name: setupLittleFS
@@ -49,6 +52,8 @@ void closeLittleFS() {
 ** Description:   Start SD Card
 ***************************************************************************************/
 bool setupSdCard(uint8_t maxFiles) {
+    std::lock_guard<std::recursive_mutex> lock(sdMountMutex);
+    if (SD.rawAccessActive()) return false;
     if (maxFiles < 1) { maxFiles = 1; }
 #ifndef USE_SD_MMC
     if (bruceConfigPins.SDCARD_bus.sck < 0) {
@@ -128,9 +133,11 @@ bool setupSdCard(uint8_t maxFiles) {
 ** Description:   Turn Off SDCard, set sdcardMounted state to false
 ***************************************************************************************/
 void closeSdCard() {
+    std::lock_guard<std::recursive_mutex> lock(sdMountMutex);
+    if (SD.rawAccessActive()) return;
     SD.end();
-    Serial.println("SD Card Unmounted...");
-    sdcardMounted = false;
+    sdcardMounted = SD.cardType() != CARD_NONE;
+    if (!sdcardMounted) Serial.println("SD Card Unmounted...");
 }
 
 /***************************************************************************************
@@ -138,14 +145,30 @@ void closeSdCard() {
 ** Description:   Turn Off or On the SDCard, return sdcardMounted state
 ***************************************************************************************/
 bool ToggleSDCard() {
-    if (sdcardMounted == true) {
+    std::lock_guard<std::recursive_mutex> lock(sdMountMutex);
+    if (SD.rawAccessActive()) return false;
+    if (sdcardMounted) {
         closeSdCard();
-        sdcardMounted = false;
-        return false;
-    } else {
-        sdcardMounted = setupSdCard();
         return sdcardMounted;
     }
+    return setupSdCard();
+}
+
+SdRawAccess beginSdCardRawAccess() {
+    std::lock_guard<std::recursive_mutex> lock(sdMountMutex);
+    if (SD.rawAccessActive()) return SdRawAccess::Busy;
+    if (!setupSdCard()) return SdRawAccess::Unavailable;
+    if (!SD.beginRawAccess()) return SdRawAccess::Busy;
+
+    sdcardMounted = false;
+    return SdRawAccess::Ready;
+}
+
+bool endSdCardRawAccess() {
+    std::lock_guard<std::recursive_mutex> lock(sdMountMutex);
+    const bool mounted = SD.endRawAccess();
+    sdcardMounted = mounted;
+    return mounted;
 }
 /***************************************************************************************
 ** Function name: deleteFromSd
@@ -300,22 +323,43 @@ bool copyFile(FS fs, String path) {
 ** Function name: pasteFile
 ** Description:   paste file to new folder
 ***************************************************************************************/
-bool pasteFile(FS fs, String path) {
-    // Using Global Buffer
-
-    // Abrir o arquivo original
-    File sourceFile = fs.open(fileToCopy, FILE_READ);
-    if (!sourceFile) {
-        // Serial.println("Falha ao abrir o arquivo original para leitura");
-        return false;
+static String normalizedPastePath(const String &path) {
+    String normalized;
+    normalized.reserve(path.length());
+    int start = 0;
+    while (start < path.length()) {
+        int end = start;
+        while (end < path.length() && path[end] != '/') ++end;
+        String component = path.substring(start, end);
+        start = end + 1;
+        if (component.isEmpty() || component == ".") continue;
+        if (component == "..") {
+            normalized = normalized.substring(0, max(0, normalized.lastIndexOf('/')));
+            continue;
+        }
+        normalized += "/" + component;
     }
+    return normalized;
+}
 
-    // Criar o arquivo de destino
-    File destFile = fs.open(path + "/" + fileToCopy.substring(fileToCopy.lastIndexOf('/') + 1), FILE_WRITE);
-    if (!destFile) {
-        // Serial.println("Falha ao criar o arquivo de destino");
-        sourceFile.close();
-        return false;
+bool pasteFile(FS &fs, const String &path) { return pasteFile(fs, path, fileToCopy); }
+
+bool pasteFile(FS &fs, const String &path, const String &source) {
+    const bool fat = &fs == &SD;
+    int separator = source.lastIndexOf('/');
+    if (fat) separator = max(separator, source.lastIndexOf('\\'));
+    const String destination = path + "/" + source.substring(separator + 1);
+    File sourceFile, destFile;
+
+    if (fat) {
+        if (!SD.openCopyFiles(source, destination, sourceFile, destFile)) return false;
+    } else {
+        // Prevent FILE_WRITE from truncating the source through a lexical alias.
+        if (normalizedPastePath(source) == normalizedPastePath(destination)) return false;
+        sourceFile = fs.open(source, FILE_READ);
+        if (!sourceFile || sourceFile.isDirectory()) return false;
+        destFile = fs.open(destination, FILE_WRITE);
+        if (!destFile) return false;
     }
 
     // Ler dados do arquivo original e escrever no arquivo de destino
@@ -505,11 +549,18 @@ bool sortList(const FileList &a, const FileList &b) {
         return a.folder > b.folder; // true if a is a folder and b is not
     }
     // Order items alphabetically
-    String fa = a.filename.c_str();
-    fa.toUpperCase();
-    String fb = b.filename.c_str();
-    fb.toUpperCase();
-    return fa < fb;
+    const unsigned char *left = reinterpret_cast<const unsigned char *>(a.filename.c_str());
+    const unsigned char *right = reinterpret_cast<const unsigned char *>(b.filename.c_str());
+    // Borrowed NUL-terminated strings remain valid for this synchronous comparison.
+    // Unsigned bytes keep toupper() defined for UTF-8 names; no temporary allocation.
+    while (*left && *right) {
+        int l = std::toupper(*left);
+        int r = std::toupper(*right);
+        if (l != r) return l < r;
+        ++left;
+        ++right;
+    }
+    return *left < *right;
 }
 
 /***************************************************************************************
@@ -618,26 +669,7 @@ String loopSD(FS &fs, bool filePicker, const String &allowed_ext, String rootPat
             return "";
         }
     }
-    std::vector<Option> sdOptions;
-    auto rebuildSdOptions = [&]() {
-        sdOptions.clear();
-        for (auto &f : fileList) {
-            String label = f.filename + (f.folder && !f.operation ? "/" : "");
-            Option opt(label, []() {});
-            // Matches the colors the old listFiles() drew: folders dimmer than files, "> Back" in
-            // ALCOLOR; plain files keep drawOptions()'s default (fgcolor) by leaving hasColor unset.
-            if (f.operation) {
-                opt.hasColor = true;
-                opt.color = ALCOLOR;
-            } else if (f.folder) {
-                opt.hasColor = true;
-                opt.color = getColorVariation(bruceConfig.priColor);
-            }
-            sdOptions.push_back(opt);
-        }
-    };
     readFs(fs, Folder, allowed_ext);
-    rebuildSdOptions();
 
     while (1) {
         if (exit) break; // stop this loop and return to the previous loop
@@ -647,16 +679,22 @@ String loopSD(FS &fs, bool filePicker, const String &allowed_ext, String rootPat
             tft.drawRoundRect(5, 5, tftWidth - 10, tftHeight - 10, 5, bruceConfig.priColor);
             Serial.println("reload to read: " + Folder);
             readFs(fs, Folder, allowed_ext);
-            rebuildSdOptions();
             PreFolder = Folder;
-            if (strcmp(PreFolder.c_str(), Folder.c_str()) != 0 || index >= (int)sdOptions.size()) index = 0;
+            if (strcmp(PreFolder.c_str(), Folder.c_str()) != 0 || index >= (int)fileList.size()) index = 0;
             reload = false;
         }
-        if (sdOptions.size() < 2) {
+        if (fileList.size() < 2) {
             readFs(fs, Folder, allowed_ext);
-            rebuildSdOptions();
         }
-        index = loopOptions(sdOptions, MENU_TYPE_REGULAR, "", index, false, true, PAGE_JUMP_SIZE, false);
+        bool longPressDetected = false;
+        index = loopFileOptions(
+            fileList, index, PAGE_JUMP_SIZE,
+#ifdef HAS_ENCODER
+            &longPressDetected
+#else
+            nullptr
+#endif
+        );
 
         if (index < 0) { // ESC
         BACK_FOLDER:
@@ -676,11 +714,13 @@ String loopSD(FS &fs, bool filePicker, const String &allowed_ext, String rootPat
             break;
         }
 
+#ifndef HAS_ENCODER
         LongPress = true;
         unsigned long LongPressTmp = millis();
         while (millis() - LongPressTmp < 500) { vTaskDelay(pdMS_TO_TICKS(10)); }
         LongPress = false;
-        bool longPressDetected = check(SelPress);
+        longPressDetected = check(SelPress);
+#endif
 
         if (isBack) {
             if (longPressDetected) {
@@ -721,7 +761,6 @@ String loopSD(FS &fs, bool filePicker, const String &allowed_ext, String rootPat
             String filename = fileList[index].filename;
             Serial.println(filepath + " --> " + filename);
             fileList.clear();  // Clear memory to allow other functions to work better
-            sdOptions.clear(); // its parallel display list too
 
             options = {
                 {"View File",  [=, &fs]() { viewFile(fs, filepath); }            },

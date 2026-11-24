@@ -1,5 +1,6 @@
 #include "display.h"
 #include "hal/power/gauge.h"
+#include "hal/inputs/encoder.h"
 #include "core/wifi/webInterface.h" // for server
 #include "core/wifi/wg.h"           //for isConnectedWireguard to print wireguard lock
 #include "mykeyboard.h"
@@ -140,20 +141,24 @@ void setTftDisplay(int x, int y, uint16_t fc, int size, uint16_t bg) {
 void turnOffDisplay() { setBrightness(0, false); }
 
 bool wakeUpScreen() {
+    inputLock();
     previousMillis = millis();
-    if (isScreenOff) {
+    bool consumed = false;
+    if (isScreenOff || dimmer) {
         isScreenOff = false;
         dimmer = false;
+#ifdef T_EMBED_1101
+        setBrightness(min(bruceConfig.bright, 100), false);
+#else
         getBrightness();
-        vTaskDelay(pdMS_TO_TICKS(200));
-        return true;
-    } else if (dimmer) {
-        dimmer = false;
-        getBrightness();
-        vTaskDelay(pdMS_TO_TICKS(200));
-        return true;
+#endif
+        consumed = true;
     }
-    return false;
+    inputUnlock();
+#ifndef T_EMBED_1101
+    if (consumed) vTaskDelay(pdMS_TO_TICKS(200));
+#endif
+    return consumed;
 }
 
 /***************************************************************************************
@@ -542,11 +547,124 @@ void padprintln(double n, int digits, int16_t padx) {
 **  Function: loopOptions
 **  Where you choose among the options in menu
 **********************************************************************/
-int loopOptions(
-    std::vector<Option> &options, uint8_t menuType, const char *subText, int index, bool interpreter,
-    bool letterShortcuts, uint16_t pageJumpSize, bool border, bool compact
+
+namespace {
+// Borrowed for one synchronous menu invocation. Neither vector may be resized by a
+// background task; file labels are read only and no c_str() survives a reload.
+class MenuListSource {
+    std::vector<Option> *actions = nullptr;
+    const std::vector<FileList> *files = nullptr;
+    int visibleStart = 0, visibleCount = 0;
+    int rowX = 0, rowY = 0, rowW = 0, rowH = 0;
+
+public:
+    explicit MenuListSource(std::vector<Option> &items) : actions(&items) {}
+    explicit MenuListSource(const std::vector<FileList> &items) : files(&items) {}
+    size_t size() const { return actions ? actions->size() : files->size(); }
+    bool empty() const { return size() == 0; }
+    bool enabled(int i) const { return !actions || (*actions)[i].enabled; }
+    bool selected(int i) const { return actions && (*actions)[i].selected; }
+    const String &rawLabel(int i) const { return actions ? (*actions)[i].label : (*files)[i].filename; }
+    String label(int i) const {
+        String text = rawLabel(i);
+        if (files && (*files)[i].folder && !(*files)[i].operation) text += '/';
+        return text;
+    }
+    bool hasColor(int i) const {
+        return actions ? (*actions)[i].hasColor : ((*files)[i].operation || (*files)[i].folder);
+    }
+    uint16_t color(int i) const {
+        if (actions) return (*actions)[i].color;
+        return (*files)[i].operation ? ALCOLOR : getColorVariation(bruceConfig.priColor);
+    }
+    void markHovered(int i) {
+        if (!actions) return;
+        for (auto &item : *actions) item.hovered = false;
+        (*actions)[i].hovered = true;
+    }
+    bool hasHover(int i) const { return actions && (*actions)[i].hover; }
+    bool renderHover(int i) {
+        if (!hasHover(i)) return false;
+        return (*actions)[i].hover((*actions)[i].hoverPointer, true);
+    }
+    void run(int i) { if (actions) (*actions)[i].operation(); }
+    std::vector<Option> &normalOptions() { return *actions; }
+    void clearBounds() {
+        visibleCount = 0;
+        if (!actions) return;
+        for (auto &item : *actions) { item.w = 0; item.h = 0; }
+    }
+    void setBounds(int i, int x, int y, int w, int h) {
+        if (actions) {
+            auto &item = (*actions)[i];
+            item.x = x; item.y = y; item.w = w; item.h = h;
+        } else {
+            if (!visibleCount) { visibleStart = i; rowX = x; rowY = y; rowW = w; rowH = h; }
+            ++visibleCount;
+        }
+    }
+    int hitTest(int x, int y) const {
+        if (actions) {
+            for (size_t i = 0; i < actions->size(); ++i)
+                if ((*actions)[i].enabled && (*actions)[i].contain(x, y)) return static_cast<int>(i);
+        } else if (visibleCount && rowH > 0 && x >= rowX && x < rowX + rowW && y >= rowY) {
+            int row = (y - rowY) / rowH;
+            if (row < visibleCount) return visibleStart + row;
+        }
+        return -1;
+    }
+};
+
+struct MenuPage {
+    int start, count, rows, upTarget, downTarget;
+    bool pageUp, pageDown;
+};
+
+// The first touch page reserves Down, middle pages reserve Up + Down, and
+// the last reserves Up. Compute only this page, independent of directory size.
+MenuPage calculateMenuPage(int size, int index, int fitRows, bool touchPaging) {
+    if (fitRows < 1) fitRows = 1;
+    if (size <= fitRows) return {0, size, size, 0, 0, false, false};
+    if (!touchPaging) {
+        int start = index / fitRows * fitRows;
+        int count = size - start < fitRows ? size - start : fitRows;
+        return {start, count, fitRows, 0, 0, false, false};
+    }
+    if (fitRows <= 2) {
+        int rows = size < 3 ? size : 3;
+        return {index, 1, rows, index - 1, index + 1, index > 0, index + 1 < size};
+    }
+    int firstCount = fitRows - 1;
+    if (index < firstCount) return {0, firstCount, fitRows, 0, firstCount, false, true};
+    int middleCount = fitRows - 2;
+    int remaining = size - firstCount;
+    int middlePages = (remaining - 2) / middleCount;
+    int page = (index - firstCount) / middleCount;
+    if (page > middlePages) page = middlePages;
+    int start = firstCount + page * middleCount;
+    int upTarget = page == 0 ? 0 : start - middleCount;
+    bool down = page < middlePages;
+    int count = down ? middleCount : size - start;
+    return {start, count, fitRows, upTarget, start + count, true, down};
+}
+
+Opt_Coord drawMenuOptions(
+    int index, MenuListSource &options, uint16_t fgcolor, uint16_t selcolor, uint16_t bgcolor,
+    bool firstRender, bool border, bool compact
+);
+} // namespace
+
+static int loopMenuOptions(
+    MenuListSource &options, uint8_t menuType, const char *subText, int index, bool interpreter,
+    bool letterShortcuts, uint16_t pageJumpSize, bool border, bool compact, bool *longPressResult
 ) {
+    // Borrowed output only; never retained by a callback or another task.
+    if (longPressResult) *longPressResult = false;
     if (options.empty()) return -1;
+#ifdef HAS_ENCODER
+    EncoderMenuSelect menuSelect(hal_encoder_select_state().generation);
+    RemoteMenuSelect remoteMenuSelect(readRemoteSelectState().generation);
+#endif
 
     bool useTapToSelect = menuType == MENU_TYPE_REGULAR ||
                           (bruceConfig.mainMenuStyle == MAIN_MENU_GRID && menuType == MENU_TYPE_MAIN);
@@ -560,7 +678,7 @@ int loopOptions(
 
     auto findFirstEnabled = [&]() -> int {
         for (size_t i = 0; i < options.size(); i++) {
-            if (options[i].enabled) return static_cast<int>(i);
+            if (options.enabled(i)) return static_cast<int>(i);
         }
         return -1;
     };
@@ -571,13 +689,13 @@ int loopOptions(
         int idx = start;
         for (int i = 0; i < size; i++) {
             idx = (idx + step + size) % size;
-            if (options[idx].enabled) return idx;
+            if (options.enabled(idx)) return idx;
         }
         return -1;
     };
 
     if (index < 0 || index >= static_cast<int>(options.size())) index = 0;
-    if (!options[index].enabled) {
+    if (!options.enabled(index)) {
         int firstEnabled = findFirstEnabled();
         if (firstEnabled < 0) return -1;
         index = firstEnabled;
@@ -588,7 +706,6 @@ int loopOptions(
     bool exit = false;
     int menuSize = options.size();
     int devModeCounter = 0;
-    static unsigned long _clock_bat_timer = millis();
     if (options.size() > MAX_MENU_SIZE) { menuSize = MAX_MENU_SIZE; }
     if (index > 0 && !compact) {
         if (border)
@@ -612,8 +729,12 @@ int loopOptions(
     }
     if (index >= options.size()) index = 0;
     bool firstRender = true;
+    bool submenuNeedsFullRedraw = true;
+    int previousSubmenuIndex = -1;
+#ifndef HAS_ENCODER
     unsigned long menuOpenTs =
         0; // timestamp when this menu was first rendered (per-invocation, not shared across nested menus)
+#endif
 #if defined(HAS_TOUCH)
     bool showEscButton = useTapToSelect && menuType == MENU_TYPE_REGULAR;
     const int escW = 5 * LW * FM + 4;
@@ -622,7 +743,13 @@ int loopOptions(
     const int escY = BORDER_OFFSET_FROM_SCREEN_EDGE + 2;
 #endif
     if (!compact) drawMainBorder();
+    else if (menuType == MENU_TYPE_SUBMENU) drawStatusBar();
+    unsigned long statusBarDrawTs = millis(); // Start from the actual initial status draw.
     while (1) {
+#ifdef HAS_ENCODER
+        bool syntheticTouchSelect = false;
+        bool selectionMoved = false;
+#endif
         // Check for shutdown before drawing menu to avoid drawing a black bar on the screen
         if (exit) break;
         if (menuType == MENU_TYPE_MAIN) {
@@ -631,27 +758,28 @@ int loopOptions(
                 bruceConfig.setDevMode(true);
                 displayInfo("Dev Mode Enabled", true);
             }
-            if (millis() - _clock_bat_timer > 30000) {
-                _clock_bat_timer = millis();
-                drawStatusBar(); // update clock and battery status each 30s
-            }
         }
 
         if (redraw) {
             menuOptionType = menuType; // updates menutype to the remote controller
             menuOptionLabel = subText;
             // update the hovered
-            for (auto &opt : options) opt.hovered = false;
-            options[index].hovered = true;
+            options.markHovered(index);
 
             bool renderedByLambda = false;
-            if (options[index].hover)
-                renderedByLambda = options[index].hover(options[index].hoverPointer, true);
+            if (options.hasHover(index)) {
+                // A hover renderer may repaint the screen or change the menu layout.
+                submenuNeedsFullRedraw = true;
+                renderedByLambda = options.renderHover(index);
+            }
 
             if (!renderedByLambda) {
-                if (menuType == MENU_TYPE_SUBMENU) drawSubmenu(index, options, subText);
-                else
-                    coord = drawOptions(
+                if (menuType == MENU_TYPE_SUBMENU) {
+                    drawSubmenu(index, options.normalOptions(), subText, submenuNeedsFullRedraw, previousSubmenuIndex);
+                    submenuNeedsFullRedraw = false;
+                    previousSubmenuIndex = index;
+                } else
+                    coord = drawMenuOptions(
                         index,
                         options,
                         bruceConfig.priColor,
@@ -662,9 +790,25 @@ int loopOptions(
                         compact
                     );
             }
+#ifndef HAS_ENCODER
             if (firstRender) menuOpenTs = millis();
+#endif
             firstRender = false;
             redraw = false;
+        }
+
+        // Refresh while idle too; draw after hover callbacks so a due update stays visible.
+        if ((menuType == MENU_TYPE_MAIN || menuType == MENU_TYPE_SUBMENU) &&
+            millis() - statusBarDrawTs >= 30000UL) {
+            drawStatusBar();
+            statusBarDrawTs = millis();
+#if defined(HAS_TOUCH)
+            // Battery/status clearing can overlap the submenu close control.
+            if (menuType == MENU_TYPE_SUBMENU) {
+                submenuNeedsFullRedraw = true;
+                redraw = true;
+            }
+#endif
         }
 
 #if defined(HAS_TOUCH)
@@ -704,15 +848,15 @@ int loopOptions(
         // Tap-to-select: a tap on a different item just selects it (redraw); a second tap on the
         // item that's already selected fires SelPress to execute it, same as the physical button.
         if (useTapToSelect && touchPoint.pressed) {
-            for (size_t i = 0; i < options.size(); i++) {
-                if (options[i].enabled && options[i].contain(touchPoint.x, touchPoint.y)) {
-                    if (static_cast<int>(i) == index) SelPress = true;
-                    else {
-                        index = static_cast<int>(i);
-                        redraw = true;
-                    }
-                    break;
+            int hit = options.hitTest(touchPoint.x, touchPoint.y);
+            if (hit >= 0) {
+                if (hit == index) {
+                    SelPress = true;
+#ifdef HAS_ENCODER
+                    syntheticTouchSelect = true;
+#endif
                 }
+                else { index = hit; redraw = true; }
             }
             touchPoint.pressed = false;
         }
@@ -728,10 +872,10 @@ int loopOptions(
                 char pl = tolower(pressed_letter);
                 int size = static_cast<int>(options.size());
                 // start right after the current item so repeated presses cycle through duplicates
-                int start = (tolower(options[index].label.c_str()[0]) == pl) ? index + 1 : 0;
+                int start = (tolower(options.rawLabel(index).c_str()[0]) == pl) ? index + 1 : 0;
                 for (int i = 0; i < size; i++) {
                     int idx = (start + i) % size;
-                    if (options[idx].enabled && tolower(options[idx].label.c_str()[0]) == pl) {
+                    if (options.enabled(idx) && tolower(options.rawLabel(idx).c_str()[0]) == pl) {
                         index = idx;
                         redraw = true;
                         break;
@@ -755,7 +899,7 @@ int loopOptions(
         }
 
         if (menuType == MENU_TYPE_REGULAR) {
-            String txt = options[index].label;
+            String txt = options.label(index);
             displayScrollingText(txt, coord, true);
         }
 #ifdef HAS_3_BUTTONS
@@ -783,7 +927,7 @@ int loopOptions(
 
                 int idx = row * cols + col;
                 if (idx >= size) idx = size - 1; // the last row can be shorter than the others
-                if (options[idx].enabled) index = idx;
+                if (options.enabled(idx)) index = idx;
 
                 devModeCounter = 0;
                 redraw = true;
@@ -793,6 +937,7 @@ int loopOptions(
 #ifdef HAS_ENCODER
         int32_t rotarySteps = drainRotarySteps();
         if (rotarySteps != 0) {
+            selectionMoved = true;
             check(PrevPress);
             check(NextPress);
             check(UpPress);
@@ -822,6 +967,9 @@ int loopOptions(
 #endif
         {
             if (PrevPress || check(UpPress)) {
+#ifdef HAS_ENCODER
+                selectionMoved = true;
+#endif
                 devModeCounter = 0;
 #ifdef HAS_KEYBOARD
                 check(PrevPress);
@@ -864,6 +1012,9 @@ int loopOptions(
             }
             /* DW Btn to next item */
             if (check(NextPress) || check(DownPress)) {
+#ifdef HAS_ENCODER
+                selectionMoved = true;
+#endif
                 int nextEnabled = findNextEnabled(index, +1);
                 if (nextEnabled >= 0) {
                     if (!bruceConfig.devMode && nextEnabled <= index) devModeCounter++;
@@ -877,20 +1028,46 @@ int loopOptions(
         /* Select and run function
         forceMenuOption is set by a SerialCommand to force a selection within the menu
         */
-        // Prevent immediate selection if the SEL button was already being held when the menu opened.
-        // Allow a short grace period for the user to release the button first.
-        static const unsigned long MENU_SELECT_IGNORE_MS = 600; // ms to ignore SEL after menu opens
+        bool selectRequested = false;
+#ifdef HAS_ENCODER
+        inputLock();
+        const EncoderButtonState select = hal_encoder_select_state();
+        const RemoteSelectState remoteSelect = readRemoteSelectState();
+        const bool syntheticSelect = syntheticTouchSelect ||
+                                     (!hal_encoder_select_event_is_physical() && !remoteSelect.legacyEvent);
+        const bool selectPulse = check(SelPress);
+        inputUnlock();
 
-        if (forceMenuOption >= 0 || (millis() - menuOpenTs > MENU_SELECT_IGNORE_MS && check(SelPress))) {
+        bool longPress = false;
+        selectRequested = menuSelect.update(select, millis(), index, selectionMoved, longPressResult != nullptr, longPress);
+        if (selectRequested && longPressResult) *longPressResult = longPress;
+        if (selectPulse && syntheticSelect) {
+            menuSelect.cancel();
+            if (longPressResult) *longPressResult = false;
+            selectRequested = true;
+        }
+        bool remoteLongPress = false;
+        if (remoteMenuSelect.consume(remoteSelect, remoteLongPress)) {
+            menuSelect.cancel();
+            if (longPressResult) *longPressResult = remoteLongPress;
+            selectRequested = true;
+        }
+#else
+        // Other input HALs can synthesize select on release or on a gesture;
+        // retain their existing entry guard until they expose physical state.
+        selectRequested = millis() - menuOpenTs > 600 && check(SelPress);
+#endif
+        if (forceMenuOption >= 0 || selectRequested) {
             uint16_t chosen = index;
             if (forceMenuOption >= 0) {
+                if (longPressResult) *longPressResult = false;
                 chosen = forceMenuOption;
                 forceMenuOption = -1; // reset SerialCommand navigation option
                 Serial.print("Forcely ");
             }
-            if (chosen >= options.size() || !options[chosen].enabled) continue;
-            Serial.println("Selected: " + String(options[chosen].label));
-            options[chosen].operation();
+            if (chosen >= options.size() || !options.enabled(chosen)) continue;
+            Serial.println("Selected: " + String(options.label(chosen)));
+            options.run(chosen);
             break;
         }
         // interpreter_start -> running the interpreter
@@ -898,9 +1075,22 @@ int loopOptions(
         if (interpreter_state > 0 && !interpreter) { break; }
     }
 
-    RotaryNetSteps = 0; // reset rotary steps to avoid unexpected jumps in the next menu
+    RotaryNetSteps.exchange(0, std::memory_order_relaxed);
     touchZoneOutsideFooterEnabled = prevTouchZoneOutsideFooterEnabled;
     return index;
+}
+
+int loopOptions(
+    std::vector<Option> &options, uint8_t menuType, const char *subText, int index, bool interpreter,
+    bool letterShortcuts, uint16_t pageJumpSize, bool border, bool compact, bool *longPressResult
+) {
+    MenuListSource source(options);
+    return loopMenuOptions(source, menuType, subText, index, interpreter, letterShortcuts, pageJumpSize, border, compact, longPressResult);
+}
+
+int loopFileOptions(const std::vector<FileList> &files, int index, uint16_t pageJumpSize, bool *longPressResult) {
+    MenuListSource source(files);
+    return loopMenuOptions(source, MENU_TYPE_REGULAR, "", index, false, true, pageJumpSize, false, false, longPressResult);
 }
 
 /***************************************************************************************
@@ -932,8 +1122,9 @@ void progressHandler(int progress, size_t total, const String &message) {
 ** Function name: drawOptions
 ** Description:   Função para desenhar e mostrar as opçoes de contexto
 ***************************************************************************************/
-Opt_Coord drawOptions(
-    int index, std::vector<Option> &options, uint16_t fgcolor, uint16_t selcolor, uint16_t bgcolor,
+namespace {
+Opt_Coord drawMenuOptions(
+    int index, MenuListSource &options, uint16_t fgcolor, uint16_t selcolor, uint16_t bgcolor,
     bool firstRender, bool border, bool compact
 ) {
     static int last_index = 0;
@@ -950,67 +1141,27 @@ Opt_Coord drawOptions(
     if (fitRows < 1) fitRows = 1;
 
     int arraySize = static_cast<int>(options.size());
-    bool needsPaging = arraySize > fitRows;
 #if defined(HAS_TOUCH)
-    bool touchPaging = needsPaging;
+    bool touchPaging = arraySize > fitRows;
 #else
     bool touchPaging = false;
 #endif
 
-    struct SubmenuPage {
-        int start;
-        int count;
-        bool pageUp;
-        bool pageDown;
-    };
-    std::vector<SubmenuPage> pages;
-    int maxRowsAcrossPages = 0;
-    if (needsPaging) {
-        int remaining = arraySize;
-        int pageStart = 0;
-        while (remaining > 0) {
-            bool hasUp = touchPaging && !pages.empty();
-            int maxOptions = fitRows - (hasUp ? 1 : 0);
-            if (maxOptions < 1) maxOptions = 1;
-            int count = remaining < maxOptions ? remaining : maxOptions;
-            bool hasDown = false;
-            if (touchPaging) {
-                hasDown = remaining > count;
-                if (hasDown) {
-                    int maxWithDown = fitRows - (hasUp ? 1 : 0) - 1;
-                    if (maxWithDown < 1) maxWithDown = 1;
-                    count = count < maxWithDown ? count : maxWithDown;
-                    if (count >= remaining) hasDown = false;
-                }
-            }
-            pages.push_back({pageStart, count, hasUp, hasDown});
-            int rowsForThisPage = count + (hasUp ? 1 : 0) + (hasDown ? 1 : 0);
-            if (rowsForThisPage > maxRowsAcrossPages) maxRowsAcrossPages = rowsForThisPage;
-            pageStart += count;
-            remaining -= count;
-        }
-    }
-    if (pages.empty()) pages.push_back({0, arraySize < fitRows ? arraySize : fitRows, false, false});
-
-    int currentPage = 0;
-    for (size_t p = 0; p < pages.size(); ++p) {
-        currentPage = static_cast<int>(p);
-        if (index >= pages[p].start && index < pages[p].start + pages[p].count) break;
-    }
-    int init = pages[currentPage].start;
-    int menuSize = pages[currentPage].count;
+    MenuPage page = calculateMenuPage(arraySize, index, fitRows, touchPaging);
+    int init = page.start;
+    int menuSize = page.count;
     if (menuSize < 1) menuSize = 1;
-    bool showPageUp = pages[currentPage].pageUp;
-    bool showPageDown = pages[currentPage].pageDown;
+    bool showPageUp = page.pageUp;
+    bool showPageDown = page.pageDown;
 
 #if defined(HAS_TOUCH)
     s_pageUpVisible = false;
     s_pageDownVisible = false;
-    if (showPageUp) s_pageUpTargetIndex = pages[currentPage - 1].start;
-    if (showPageDown) s_pageDownTargetIndex = pages[currentPage + 1].start;
+    if (showPageUp) s_pageUpTargetIndex = page.upTarget;
+    if (showPageDown) s_pageDownTargetIndex = page.downTarget;
 #endif
 
-    int totalRows = needsPaging ? maxRowsAcrossPages : menuSize;
+    int totalRows = page.rows;
     if (totalRows < 1) totalRows = 1;
     int32_t boxX = border ? tftWidth * 0.10 : BORDER_OFFSET_FROM_SCREEN_EDGE;
     int32_t boxW = border ? tftWidth * 0.8 : tftWidth - 2 * BORDER_OFFSET_FROM_SCREEN_EDGE;
@@ -1033,8 +1184,6 @@ Opt_Coord drawOptions(
     tft.setTextSize(FM);
     tft.setCursor(boxX + BORDER_OFFSET_FROM_SCREEN_EDGE, contentTopY);
 
-    int i = 0;
-    int cont = 1;
 
     // check if cycling from last item to first
     if (abs(index - last_index) >= menuSize) {
@@ -1043,10 +1192,7 @@ Opt_Coord drawOptions(
     }
 
     // Scrolled-out items keep a stale tap rect otherwise; clear before repopulating the visible ones.
-    for (auto &opt : options) {
-        opt.w = 0;
-        opt.h = 0;
-    }
+    options.clearBounds();
 
 #if defined(HAS_TOUCH)
     if (showPageUp) {
@@ -1064,53 +1210,45 @@ Opt_Coord drawOptions(
     }
 #endif
 
-    cont = 1;
-    for (i = 0; i < options.size(); i++) {
-        if (i >= init) {
-            int16_t cursorY = tft.getCursorY();
-            options[i].x = boxX;
-            options[i].y = cursorY;
-            options[i].w = boxW;
-            options[i].h = FM * LH + 4;
-            // Erase previously highlited element,
-            if (i == last_index) {
-                tft.fillRoundRect(boxX + 2, cursorY + 2, boxW - 4, FM * LH + 2, 3, bruceConfig.bgColor);
-            }
-            if (i == index) {
-                uint16_t highlightColor = options[i].hasColor ? options[i].color : bruceConfig.priColor;
-                tft.fillRoundRect(boxX + 2, cursorY + 2, boxW - 4, FM * LH + 2, 3, highlightColor);
-            }
-
-            if (options[i].selected) tft.setTextColor(selcolor, bgcolor); // if selected, change Text color
-            else if (options[i].hasColor) tft.setTextColor(options[i].color, bgcolor);
-            else tft.setTextColor(fgcolor, bgcolor);
-            if (!options[i].enabled) tft.setTextColor(TFT_DARKGREY, bgcolor);
-
-            String text = "";
-            if (i == index) {
-                text += ">";
-                coord.x = boxX + BORDER_OFFSET_FROM_SCREEN_EDGE + FM * LW;
-                coord.y = tft.getCursorY() + 4;
-                coord.size = (boxW - 10) / (LW * FM) - 1;
-                coord.fgcolor = options[i].hasColor ? options[i].color : fgcolor;
-                coord.bgcolor = bgcolor;
-            } else text += " ";
-            text += String(options[i].label) + "                                                      ";
-            tft.setCursor(boxX + BORDER_OFFSET_FROM_SCREEN_EDGE, tft.getCursorY() + 4);
-
-            // Draw text with appropriate colors for selection
-            if (i == index) {
-                uint16_t highlightColor = options[i].hasColor ? options[i].color : bruceConfig.priColor;
-                tft.setTextColor(bgcolor, highlightColor);
-            }
-            tft.println(text.substring(0, (boxW - 10) / (LW * FM) - 1));
-
-            // Reset text color for next item
-            tft.setTextColor(fgcolor, bgcolor);
-
-            cont++;
+    for (int i = init; i < arraySize && i < init + menuSize; i++) {
+        int16_t cursorY = tft.getCursorY();
+        options.setBounds(i, boxX, cursorY, boxW, FM * LH + 4);
+        // Erase previously highlited element,
+        if (i == last_index) {
+            tft.fillRoundRect(boxX + 2, cursorY + 2, boxW - 4, FM * LH + 2, 3, bruceConfig.bgColor);
         }
-        if (cont > menuSize) break;
+        if (i == index) {
+            uint16_t highlightColor = options.hasColor(i) ? options.color(i) : bruceConfig.priColor;
+            tft.fillRoundRect(boxX + 2, cursorY + 2, boxW - 4, FM * LH + 2, 3, highlightColor);
+        }
+
+        if (options.selected(i)) tft.setTextColor(selcolor, bgcolor); // if selected, change Text color
+        else if (options.hasColor(i)) tft.setTextColor(options.color(i), bgcolor);
+        else tft.setTextColor(fgcolor, bgcolor);
+        if (!options.enabled(i)) tft.setTextColor(TFT_DARKGREY, bgcolor);
+
+        String text = "";
+        if (i == index) {
+            text += ">";
+            coord.x = boxX + BORDER_OFFSET_FROM_SCREEN_EDGE + FM * LW;
+            coord.y = tft.getCursorY() + 4;
+            coord.size = (boxW - 10) / (LW * FM) - 1;
+            coord.fgcolor = options.hasColor(i) ? options.color(i) : fgcolor;
+            coord.bgcolor = bgcolor;
+        } else text += " ";
+        text += String(options.label(i)) + "                                                      ";
+        tft.setCursor(boxX + BORDER_OFFSET_FROM_SCREEN_EDGE, tft.getCursorY() + 4);
+
+        // Draw text with appropriate colors for selection
+        if (i == index) {
+            uint16_t highlightColor = options.hasColor(i) ? options.color(i) : bruceConfig.priColor;
+            tft.setTextColor(bgcolor, highlightColor);
+        }
+        tft.println(text.substring(0, (boxW - 10) / (LW * FM) - 1));
+
+        // Reset text color for next item
+        tft.setTextColor(fgcolor, bgcolor);
+
     }
 #if defined(HAS_TOUCH)
     if (showPageDown) {
@@ -1145,44 +1283,53 @@ Opt_Coord drawOptions(
     return coord;
 }
 
+} // namespace
+
+Opt_Coord drawOptions(
+    int index, std::vector<Option> &options, uint16_t fgcolor, uint16_t selcolor, uint16_t bgcolor,
+    bool firstRender, bool border, bool compact
+) {
+    MenuListSource source(options);
+    return drawMenuOptions(index, source, fgcolor, selcolor, bgcolor, firstRender, border, compact);
+}
+
 /***************************************************************************************
 ** Function name: drawSubmenu
 ** Description:   Função para desenhar e mostrar as opçoes de contexto
 ***************************************************************************************/
-void drawSubmenu(int index, std::vector<Option> &options, const char *title) {
-    drawStatusBar();
-    int menuSize = options.size();
-    tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
-    tft.setTextSize(FP);
-    tft.drawPixel(0, 0, 0);
-    tft.fillRect(
-        BORDER_OFFSET_FROM_SCREEN_EDGE + 1,
-        STATUS_BAR_HEIGHT,
-        tftWidth - 2 * (BORDER_OFFSET_FROM_SCREEN_EDGE + 1),
-        LH * FP,
-        bruceConfig.bgColor
-    );
-    tft.drawString(title, BORDER_PAD_X, STATUS_BAR_HEIGHT);
+void drawSubmenu(
+    int index, std::vector<Option> &options, const char *title, bool firstRender, int previousIndex
+) {
+    const int menuSize = static_cast<int>(options.size());
+    if (menuSize == 0) return;
+    if (index < 0 || index >= menuSize) index = 0;
+    if (previousIndex < 0 || previousIndex >= menuSize) firstRender = true;
 
     int selectedTextSize = options[index].label.length() <= tftWidth / (LW * FG) - 1 ? FG : FM;
     int selectedTextH = selectedTextSize * LH;
     int neighborTextH = FM * LH;
+    int rowTextH = (FG > FM ? FG : FM) * LH;
     int rowGap = FP * (LH / 2);
-    int rowPitch = FG * LH + rowGap;
-    int rowClearH = FG * LH + rowGap;
+    // A centered clear needs two pixels below the largest glyphs to include the underline.
+    int rowPitch = rowTextH + (rowGap > 4 ? rowGap : 4);
+    int rowClearH = rowPitch;
 
     // Keep the title row intact and center the selected option in the remaining content area.
     int contentTop = STATUS_BAR_HEIGHT + LH * FP + 4;
     int contentBottom = tftHeight - BORDER_OFFSET_FROM_SCREEN_EDGE - 1;
     int middle = contentTop + (contentBottom - contentTop) / 2;
+    int rowX = BORDER_OFFSET_FROM_SCREEN_EDGE + 1;
+    int rowW = tftWidth - 2 * (BORDER_OFFSET_FROM_SCREEN_EDGE + 1);
 
-    tft.fillRect(
-        BORDER_OFFSET_FROM_SCREEN_EDGE + 1,
-        contentTop,
-        tftWidth - 2 * (BORDER_OFFSET_FROM_SCREEN_EDGE + 1),
-        contentBottom - contentTop,
-        bruceConfig.bgColor
-    );
+    if (firstRender) {
+        tft.setTextColor(bruceConfig.priColor, bruceConfig.bgColor);
+        tft.setTextSize(FP);
+        tft.drawPixel(0, 0, 0);
+        tft.fillRect(
+            rowX, STATUS_BAR_HEIGHT, rowW, contentBottom - STATUS_BAR_HEIGHT, bruceConfig.bgColor
+        );
+        tft.drawString(title, BORDER_PAD_X, STATUS_BAR_HEIGHT);
+    }
 
     int spaceAbove = middle - contentTop - neighborTextH / 2;
     int spaceBelow = contentBottom - middle - neighborTextH / 2;
@@ -1192,80 +1339,62 @@ void drawSubmenu(int index, std::vector<Option> &options, const char *title) {
     int neighbors = maxNeighbors < maxByList ? maxNeighbors : maxByList;
     if (neighbors < 0) neighbors = 0;
 
-    tft.setTextSize(FM);
-    for (int k = neighbors; k >= 1; k--) {
-        int idx = ((index - k) % menuSize + menuSize) % menuSize;
-        int itemCenterY = middle - k * rowPitch;
-        int y = itemCenterY - neighborTextH / 2;
-        tft.setTextColor(options[idx].enabled ? bruceConfig.secColor : TFT_DARKGREY);
-        tft.fillRect(
-            BORDER_OFFSET_FROM_SCREEN_EDGE + 1,
-            itemCenterY - rowClearH / 2,
-            tftWidth - 2 * (BORDER_OFFSET_FROM_SCREEN_EDGE + 1),
-            rowClearH,
-            bruceConfig.bgColor
+    bool clearScrollTrack = firstRender;
+    // The carousel keeps selection in the center, so each visible row changes on a step.
+    for (int offset = -neighbors; offset <= neighbors; ++offset) {
+        int idx = ((index + offset) % menuSize + menuSize) % menuSize;
+        int itemCenterY = middle + offset * rowPitch;
+        bool selected = offset == 0;
+        int textSize = selected ? selectedTextSize : FM;
+        int textH = textSize * LH;
+        int textW = options[idx].label.length() * textSize * LW;
+        // Overlong labels/underlines can reach the track; preserve the previous clipping by clearing it.
+        if (textW > rowW) clearScrollTrack = true;
+        tft.fillRect(rowX, itemCenterY - rowClearH / 2, rowW, rowClearH, bruceConfig.bgColor);
+        tft.setTextSize(textSize);
+        tft.setTextColor(
+            options[idx].enabled ? (selected ? bruceConfig.priColor : bruceConfig.secColor) : TFT_DARKGREY
         );
-        tft.drawCentreString(options[idx].label, tftWidth / 2, y, SMOOTH_FONT);
+        tft.drawCentreString(options[idx].label, tftWidth / 2, itemCenterY - textH / 2, SMOOTH_FONT);
+        if (selected) {
+            tft.drawFastHLine(
+                tftWidth / 2 - textW / 2,
+                middle + selectedTextH / 2 + 1,
+                textW,
+                bruceConfig.priColor
+            );
+        }
     }
 
-    // Selected item
-    tft.setTextSize(selectedTextSize);
-    tft.setTextColor(options[index].enabled ? bruceConfig.priColor : TFT_DARKGREY);
-    tft.fillRect(
-        BORDER_OFFSET_FROM_SCREEN_EDGE + 1,
-        middle - rowClearH / 2,
-        tftWidth - 2 * (BORDER_OFFSET_FROM_SCREEN_EDGE + 1),
-        rowClearH,
-        bruceConfig.bgColor
-    );
-    tft.drawCentreString(options[index].label, tftWidth / 2, middle - selectedTextH / 2, SMOOTH_FONT);
-    tft.drawFastHLine(
-        tftWidth / 2 - strlen(options[index].label.c_str()) * selectedTextSize * LW / 2,
-        middle + selectedTextH / 2 + 1,
-        strlen(options[index].label.c_str()) * selectedTextSize * LW,
-        bruceConfig.priColor
-    );
-
     tft.setTextSize(FM);
-    for (int k = 1; k <= neighbors; k++) {
-        int idx = (index + k) % menuSize;
-        int itemCenterY = middle + k * rowPitch;
-        int y = itemCenterY - neighborTextH / 2;
-        tft.setTextColor(options[idx].enabled ? bruceConfig.secColor : TFT_DARKGREY);
+    int thumbH = tftHeight / menuSize;
+    if (thumbH < 1) thumbH = 1;
+    int thumbX = tftWidth - BORDER_OFFSET_FROM_SCREEN_EDGE;
+    if (clearScrollTrack) {
+        tft.fillRect(thumbX, 0, BORDER_OFFSET_FROM_SCREEN_EDGE, tftHeight, bruceConfig.bgColor);
+    } else if (previousIndex != index) {
         tft.fillRect(
-            BORDER_OFFSET_FROM_SCREEN_EDGE + 1,
-            itemCenterY - rowClearH / 2,
-            tftWidth - 2 * (BORDER_OFFSET_FROM_SCREEN_EDGE + 1),
-            rowClearH,
+            thumbX, previousIndex * tftHeight / menuSize, BORDER_OFFSET_FROM_SCREEN_EDGE, thumbH,
             bruceConfig.bgColor
         );
-        tft.drawCentreString(options[idx].label, tftWidth / 2, y, SMOOTH_FONT);
     }
-
-    tft.fillRect(
-        tftWidth - BORDER_OFFSET_FROM_SCREEN_EDGE,
-        0,
-        BORDER_OFFSET_FROM_SCREEN_EDGE,
-        tftHeight,
-        bruceConfig.bgColor
-    );
-    tft.fillRect(
-        tftWidth - BORDER_OFFSET_FROM_SCREEN_EDGE,
-        index * tftHeight / menuSize,
-        BORDER_OFFSET_FROM_SCREEN_EDGE,
-        tftHeight / menuSize,
-        bruceConfig.priColor
-    );
+    if (clearScrollTrack || previousIndex != index) {
+        tft.fillRect(
+            thumbX, index * tftHeight / menuSize, BORDER_OFFSET_FROM_SCREEN_EDGE, thumbH, bruceConfig.priColor
+        );
+    }
 
 #if defined(HAS_TOUCH)
-    tft.setTextColor(getColorVariation(bruceConfig.priColor), bruceConfig.bgColor);
-    // Top-right, matching the "[ x ]" loopOptions()/drawOptions() draw for regular lists, and matching
-    // where touchHeatMap() (utils.cpp) now maps the EscPress zone.
-    int escW = 5 * LW * FM + 4;
-    tft.drawString(
-        "[ x ]", tftWidth - BORDER_OFFSET_FROM_SCREEN_EDGE - 2 - escW, BORDER_OFFSET_FROM_SCREEN_EDGE + 2, 1
-    );
-    TouchFooter();
+    if (firstRender) {
+        tft.setTextColor(getColorVariation(bruceConfig.priColor), bruceConfig.bgColor);
+        // Top-right, matching the regular list close button and touchHeatMap() EscPress zone.
+        int escW = 5 * LW * FM + 4;
+        tft.drawString(
+            "[ x ]", tftWidth - BORDER_OFFSET_FROM_SCREEN_EDGE - 2 - escW,
+            BORDER_OFFSET_FROM_SCREEN_EDGE + 2, 1
+        );
+        TouchFooter();
+    }
 #endif
 }
 

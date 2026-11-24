@@ -15,11 +15,13 @@
 #include "core/configPins.h"
 #include "core/serial_commands/cli.h"
 #include "core/startup_app.h"
+#include "core/remote_select.h"
 #include <Arduino.h>
 #include <ESP32Time.h>
 #include <LittleFS.h>
 #include <NTPClient.h>
 #include <SPI.h>
+#include <atomic>
 #include <functional>
 #include <io_expander/io_expander.h> // ./lib/HAL
 #include <vector>
@@ -67,7 +69,7 @@ extern NTPClient timeClient;
 
 extern int prog_handler; // 0 - Flash, 1 - LittleFS, 2 - Download
 
-extern bool sdcardMounted; // inform if SD Cardis active or not
+extern std::atomic_bool sdcardMounted; // Local FAT mount state, shared by the UI and file tasks.
 
 extern bool wifiConnected; // inform if wifi is active or not
 extern bool isWebUIActive; // inform if WebUI is active or not
@@ -184,7 +186,7 @@ extern String cachedPassword;
 extern int currentScreenBrightness;
 
 // Screen sleep control variables
-extern unsigned long previousMillis;
+extern std::atomic<unsigned long> previousMillis;
 extern bool isSleeping;
 extern bool isScreenOff;
 extern bool dimmer;
@@ -223,13 +225,11 @@ extern volatile int EncoderLedChange;
 
 // Net pending rotary encoder steps, independent from NextPress/PrevPress,
 // so a consumer can apply a whole backlog at once instead of one per redraw.
-extern volatile int32_t RotaryNetSteps;
+extern std::atomic<int32_t> RotaryNetSteps;
 
 #ifdef HAS_ENCODER
 static inline int32_t drainRotarySteps() {
-    int32_t steps = RotaryNetSteps;
-    RotaryNetSteps -= steps;
-    return steps;
+    return RotaryNetSteps.exchange(0, std::memory_order_relaxed);
 }
 #endif
 
@@ -262,6 +262,7 @@ extern inline bool check(volatile bool &btn, bool resetButtonStatus = true) {
         btn = false;
         AnyKeyPress = false;
         SerialCmdPress = false;
+        if (&btn == &SelPress) remoteSelectState.legacyEvent = false;
     }
     inputUnlock();
     return true;
